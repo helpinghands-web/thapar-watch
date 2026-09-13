@@ -74,9 +74,9 @@ CREATE INDEX IF NOT EXISTS idx_chat_user_id ON chat_messages(user_id);
 CREATE INDEX IF NOT EXISTS idx_chat_created_at ON chat_messages(created_at);
 CREATE INDEX IF NOT EXISTS idx_audit_admin_id ON audit_logs(admin_id);
 
--- Insert default admin user (password: Admin@123)
+-- Insert default admin user (password: Ritvik$28!03@2007)
 INSERT INTO users (user_id, display_name, password_hash, role)
-VALUES ('thapar_chronicles_admin', 'Thapar Chronicles', '$2a$12$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/LewY5YmMxSUmGEJey', 'admin')
+VALUES ('thapar_chronicles_admin', 'Thapar Chronicles', '$2a$12$kIxMp9L7d5U8n9bF4k2hNO7sK6jQ2mX9p3vR8wL0aY4D6zS1e5M5C', 'admin')
 ON CONFLICT (user_id) DO NOTHING;
 `;
 
@@ -85,6 +85,9 @@ async function initializeDatabase() {
     console.log('🗄️  Initializing database schema...');
     await pool.query(schema);
     console.log('✅ Database schema initialized successfully!');
+    console.log('\n📋 Default Admin Credentials:');
+    console.log('   User ID: thapar_chronicles_admin');
+    console.log('   Password: Ritvik$28!03@2007\n');
     process.exit(0);
   } catch (err) {
     console.error('❌ Error initializing database:', err);
