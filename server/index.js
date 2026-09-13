@@ -1,56 +1,60 @@
+require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
-const path = require('path');
-require('dotenv').config({ path: path.join(__dirname, '../.env.local') });
+const rateLimit = require('express-rate-limit');
+const { Pool } = require('pg');
 
-const { pool, initializeDatabase } = require('./db/schema');
-const { verifyToken, verifyAdmin } = require('./middleware/auth');
-
+// Import routes
 const authRoutes = require('./routes/auth');
-const reportRoutes = require('./routes/reports');
+const reportsRoutes = require('./routes/reports');
 const chatRoutes = require('./routes/chat');
-const userRoutes = require('./routes/users');
-const { router: auditRoutes } = require('./routes/audit');
+const adminRoutes = require('./routes/admin');
+
+// Import middleware
+const { authenticateToken } = require('./middleware/auth');
+const { errorHandler } = require('./middleware/errorHandler');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// Security Middleware
+// Database connection
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+});
+
+pool.on('error', (err) => {
+  console.error('Unexpected error on idle client', err);
+});
+
+// Make pool available to routes
+app.locals.db = pool;
+
+// Middleware
 app.use(helmet());
 app.use(cors({
-  origin: process.env.NODE_ENV === 'production' ? process.env.FRONTEND_URL : '*',
+  origin: process.env.FRONTEND_URL || 'http://localhost:3000',
   credentials: true,
 }));
-
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
-// Health check endpoint
-app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+// Rate limiting
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // limit each IP to 100 requests per windowMs
 });
+app.use('/api/', limiter);
 
 // Routes
 app.use('/api/auth', authRoutes);
-app.use('/api/reports', reportRoutes);
+app.use('/api/reports', reportsRoutes);
 app.use('/api/chat', chatRoutes);
-app.use('/api/users', userRoutes);
-app.use('/api/audit', auditRoutes);
+app.use('/api/admin', authenticateToken, adminRoutes);
 
-// Error handling middleware
-app.use((err, req, res, next) => {
-  console.error('Error:', err);
-  
-  if (err.message && err.message.includes('Invalid file type')) {
-    return res.status(400).json({ error: 'Invalid file type. Only images and videos allowed.' });
-  }
-  
-  if (err.status === 413) {
-    return res.status(413).json({ error: 'File too large' });
-  }
-  
-  res.status(500).json({ error: 'Internal server error' });
+// Health check
+app.get('/health', (req, res) => {
+  res.json({ status: 'Server is running', timestamp: new Date() });
 });
 
 // 404 handler
@@ -58,33 +62,14 @@ app.use((req, res) => {
   res.status(404).json({ error: 'Endpoint not found' });
 });
 
-// Initialize database and start server
-const startServer = async () => {
-  try {
-    // Test database connection
-    await pool.query('SELECT NOW()');
-    console.log('✅ Database connection successful');
+// Error handler
+app.use(errorHandler);
 
-    // Initialize schema
-    await initializeDatabase();
-    console.log('✅ Database schema initialized');
-
-    app.listen(PORT, () => {
-      console.log(`🚀 Server running on http://localhost:${PORT}`);
-      console.log('📝 API endpoints:');
-      console.log('  - POST /api/auth/register');
-      console.log('  - POST /api/auth/login');
-      console.log('  - POST /api/reports/submit');
-      console.log('  - GET /api/reports (admin)');
-      console.log('  - GET /api/chat/status');
-      console.log('  - POST /api/chat/messages');
-    });
-  } catch (err) {
-    console.error('❌ Failed to start server:', err);
-    process.exit(1);
-  }
-};
-
-startServer();
+// Start server
+app.listen(PORT, () => {
+  console.log(`\n🚀 Thapar Watch API Server running on http://localhost:${PORT}`);
+  console.log(`📊 Database connected to: ${process.env.DATABASE_URL.split('@')[1]}`);
+  console.log(`🔐 Environment: ${process.env.NODE_ENV || 'development'}\n`);
+});
 
 module.exports = app;

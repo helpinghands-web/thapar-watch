@@ -1,16 +1,16 @@
 const express = require('express');
-const router = express.Router();
 const bcrypt = require('bcryptjs');
-const argon2 = require('argon2');
 const jwt = require('jsonwebtoken');
-const { pool } = require('../db/schema');
-const { loginLimiter } = require('../middleware/auth');
-const crypto = require('crypto');
+const { v4: uuidv4 } = require('uuid');
+const { authenticateToken } = require('../middleware/auth');
 
-// Register new user
-router.post('/register', loginLimiter, async (req, res) => {
+const router = express.Router();
+
+// Register
+router.post('/register', async (req, res) => {
   try {
     const { user_id, password, password_confirm, display_name } = req.body;
+    const db = req.app.locals.db;
 
     // Validation
     if (!user_id || !password || !display_name) {
@@ -25,121 +25,101 @@ router.post('/register', loginLimiter, async (req, res) => {
       return res.status(400).json({ error: 'Password must be at least 8 characters' });
     }
 
-    // Check if user_id already exists (case-insensitive)
-    const existing = await pool.query(
-      'SELECT id FROM users WHERE LOWER(user_id) = LOWER($1)',
-      [user_id]
-    );
-
-    if (existing.rows.length > 0) {
-      return res.status(409).json({ error: 'This User ID is already taken. Please choose another one.' });
-    }
-
-    // Hash password with Argon2
-    const password_hash = await argon2.hash(password);
-
-    // Generate unique chat ID
-    const unique_chat_id = `USER_${crypto.randomBytes(16).toString('hex')}`;
+    // Hash password
+    const salt = await bcrypt.genSalt(12);
+    const password_hash = await bcrypt.hash(password, salt);
 
     // Insert user
-    const result = await pool.query(
-      'INSERT INTO users (unique_chat_id, user_id, display_name, password_hash, role) VALUES ($1, $2, $3, $4, $5) RETURNING id, user_id, display_name',
-      [unique_chat_id, user_id, display_name, password_hash, 'user']
+    const result = await db.query(
+      'INSERT INTO users (user_id, display_name, password_hash) VALUES ($1, $2, $3) RETURNING id, user_id, display_name, role',
+      [user_id, display_name, password_hash]
     );
 
     const user = result.rows[0];
 
-    // Generate JWT token
+    // Generate token
     const token = jwt.sign(
-      { id: user.id, user_id: user.user_id, role: 'user' },
+      { id: user.id, user_id: user.user_id, role: user.role },
       process.env.JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRY || '7d' }
+      { expiresIn: '7d' }
     );
 
     res.status(201).json({
       message: 'Registration successful',
+      user: { id: user.id, user_id: user.user_id, display_name: user.display_name, role: user.role },
       token,
-      user: {
-        id: user.id,
-        user_id: user.user_id,
-        display_name: user.display_name,
-      },
     });
-  } catch (err) {
-    console.error('Registration error:', err);
+  } catch (error) {
+    console.error('Register error:', error);
+    if (error.code === '23505') {
+      return res.status(409).json({ error: 'User ID already exists' });
+    }
     res.status(500).json({ error: 'Registration failed' });
   }
 });
 
 // Login
-router.post('/login', loginLimiter, async (req, res) => {
+router.post('/login', async (req, res) => {
   try {
     const { user_id, password } = req.body;
+    const db = req.app.locals.db;
 
     if (!user_id || !password) {
       return res.status(400).json({ error: 'User ID and password required' });
     }
 
-    // Find user by user_id (case-insensitive)
-    const result = await pool.query(
-      'SELECT id, user_id, display_name, password_hash, role, account_status FROM users WHERE LOWER(user_id) = LOWER($1)',
-      [user_id]
-    );
-
-    if (result.rows.length === 0) {
-      return res.status(401).json({ error: 'Incorrect User ID or password.' });
-    }
-
+    // Find user
+    const result = await db.query('SELECT * FROM users WHERE user_id = $1', [user_id]);
     const user = result.rows[0];
 
-    // Check account status
-    if (user.account_status !== 'active') {
-      return res.status(403).json({ error: 'Account is suspended or deleted.' });
+    if (!user) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+
+    if (!user.is_active) {
+      return res.status(403).json({ error: 'Account is inactive' });
     }
 
     // Verify password
-    const validPassword = await argon2.verify(user.password_hash, password);
-
+    const validPassword = await bcrypt.compare(password, user.password_hash);
     if (!validPassword) {
-      return res.status(401).json({ error: 'Incorrect User ID or password.' });
+      return res.status(401).json({ error: 'Invalid credentials' });
     }
 
-    // Generate JWT token
+    // Generate token
     const token = jwt.sign(
       { id: user.id, user_id: user.user_id, role: user.role },
       process.env.JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRY || '7d' }
+      { expiresIn: '7d' }
     );
 
     res.json({
       message: 'Login successful',
+      user: { id: user.id, user_id: user.user_id, display_name: user.display_name, role: user.role },
       token,
-      user: {
-        id: user.id,
-        user_id: user.user_id,
-        display_name: user.display_name,
-        role: user.role,
-      },
     });
-  } catch (err) {
-    console.error('Login error:', err);
+  } catch (error) {
+    console.error('Login error:', error);
     res.status(500).json({ error: 'Login failed' });
   }
 });
 
 // Verify token
-router.post('/verify', (req, res) => {
-  const token = req.headers.authorization?.split(' ')[1];
-
-  if (!token) {
-    return res.status(401).json({ valid: false });
-  }
-
+router.post('/verify', authenticateToken, async (req, res) => {
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    res.json({ valid: true, user: decoded });
-  } catch (err) {
-    res.status(401).json({ valid: false });
+    const db = req.app.locals.db;
+    const result = await db.query('SELECT id, user_id, display_name, role FROM users WHERE id = $1', [
+      req.user.id,
+    ]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    res.json({ user: result.rows[0] });
+  } catch (error) {
+    console.error('Verify error:', error);
+    res.status(500).json({ error: 'Verification failed' });
   }
 });
 
